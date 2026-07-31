@@ -22,6 +22,16 @@ interface RegisteredTool {
   requiredCapability?: keyof ProviderCapabilities;
 }
 
+export const toolErrorSchema = {
+  type: "object" as const,
+  additionalProperties: false,
+  properties: {
+    code: { type: "string" as const, const: "tool_execution_failed" },
+    message: { type: "string" as const },
+  },
+  required: ["code", "message"],
+};
+
 const tools: RegisteredTool[] = [];
 
 export function registerTool(
@@ -77,6 +87,21 @@ export function sanitizeErrorMessage(message: string, redactTokens: (s: string) 
   return redactTokens(message).replace(/\/[^\s:,'"]+\//g, "[path]/");
 }
 
+function errorResult(tool: RegisteredTool, message: string) {
+  return {
+    content: [{ type: "text" as const, text: message }],
+    ...(tool.definition.outputSchema
+      ? {
+          structuredContent: {
+            schemaVersion: "1.0",
+            error: { code: "tool_execution_failed", message },
+          },
+        }
+      : {}),
+    isError: true,
+  };
+}
+
 export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
@@ -91,25 +116,16 @@ export async function handleToolCall(
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
   }
   if (!isToolEnabled(name)) {
-    return {
-      content: [{
-        type: "text",
-        text: `Tool "${name}" is disabled: its group "${TOOL_GROUPS[name]}" is not in MAILBOX_MCP_TOOLS (currently "${process.env.MAILBOX_MCP_TOOLS}").`,
-      }],
-      isError: true,
-    };
+    return errorResult(
+      tool,
+      `Tool "${name}" is disabled: its group "${TOOL_GROUPS[name]}" is not in MAILBOX_MCP_TOOLS (currently "${process.env.MAILBOX_MCP_TOOLS}").`,
+    );
   }
 
   if (tool.requiredCapability && args.account) {
     const provider = await ctx.getProvider(args.account as string);
     if (!provider.capabilities[tool.requiredCapability]) {
-      return {
-        content: [{
-          type: "text",
-          text: `${provider.type.toUpperCase()} accounts don't support ${tool.requiredCapability}.`,
-        }],
-        isError: true,
-      };
+      return errorResult(tool, `${provider.type.toUpperCase()} accounts don't support ${tool.requiredCapability}.`);
     }
   }
 
@@ -118,6 +134,6 @@ export async function handleToolCall(
   } catch (error) {
     const { redactTokens } = await import("../security/sanitize.js");
     const message = error instanceof Error ? error.message : String(error);
-    return { content: [{ type: "text", text: sanitizeErrorMessage(message, redactTokens) }], isError: true };
+    return errorResult(tool, sanitizeErrorMessage(message, redactTokens));
   }
 }

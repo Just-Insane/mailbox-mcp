@@ -1,4 +1,4 @@
-import { registerTool } from "./registry.js";
+import { registerTool, toolErrorSchema } from "./registry.js";
 import { fenceEmailContent, fenceEmailHeader } from "../security/sanitize.js";
 
 const attachmentSchema = {
@@ -50,8 +50,10 @@ registerTool(
       properties: {
         schemaVersion: { type: "string" as const, const: "1.0" },
         messages: { type: "array" as const, items: emailSummarySchema },
+        error: toolErrorSchema,
       },
-      required: ["schemaVersion", "messages"],
+      required: ["schemaVersion"],
+      oneOf: [{ required: ["messages"] }, { required: ["error"] }],
     },
   },
   async (args, ctx) => {
@@ -99,8 +101,10 @@ registerTool(
           },
           required: [...emailSummarySchema.required, "body", "cc", "bcc", "attachments"],
         },
+        error: toolErrorSchema,
       },
-      required: ["schemaVersion", "message"],
+      required: ["schemaVersion"],
+      oneOf: [{ required: ["message"] }, { required: ["error"] }],
     },
   },
   async (args, ctx) => {

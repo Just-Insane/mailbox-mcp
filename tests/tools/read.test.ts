@@ -56,6 +56,20 @@ describe("read tools", () => {
     });
   });
 
+  it("returns schema-compatible structured content when a structured tool fails", async () => {
+    vi.mocked(mockProvider.searchMessages).mockRejectedValueOnce(new Error("mail service unavailable"));
+
+    const result = await handleToolCall("search_emails", { account: "personal", query: "from:sender" }, ctx);
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        schemaVersion: "1.0",
+        error: { code: "tool_execution_failed", message: "mail service unavailable" },
+      },
+    });
+  });
+
   it("read_thread fences body and subject at MCP exit", async () => {
     const result = await handleToolCall("read_thread", { account: "personal", thread_id: "thread-1" }, ctx);
     expect(result.content[0].text).toContain("thread-1");

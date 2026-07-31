@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { handleToolCall, type ToolContext } from "../../src/tools/registry.js";
+import { getAllToolDefinitions, handleToolCall, type ToolContext } from "../../src/tools/registry.js";
 import type { MailProvider } from "../../src/providers/interface.js";
 import "../../src/tools/read.js";
 
@@ -23,10 +23,26 @@ describe("read tools", () => {
     ctx = { accountManager: { listAccounts: vi.fn(), getAccount: vi.fn() } as any, getProvider: vi.fn().mockReturnValue(mockProvider) };
   });
 
+  it("advertises versioned output schemas for PCP mail reads", () => {
+    for (const name of ["search_emails", "read_email"]) {
+      const definition = getAllToolDefinitions().find(tool => tool.name === name);
+      expect(definition?.outputSchema).toEqual(expect.objectContaining({
+        type: "object",
+        properties: expect.objectContaining({
+          schemaVersion: { type: "string", const: "1.0" },
+        }),
+      }));
+    }
+  });
+
   it("search_emails returns results", async () => {
     const result = await handleToolCall("search_emails", { account: "personal", query: "from:sender" }, ctx);
     expect(result.content[0].text).toContain("msg-1");
     expect(result.content[0].text).toContain("sender@test.com");
+    expect(result.structuredContent).toEqual({
+      schemaVersion: "1.0",
+      messages: [expect.objectContaining({ id: "msg-1" })],
+    });
   });
 
   it("read_email fences body and subject at MCP exit", async () => {
@@ -34,6 +50,24 @@ describe("read tools", () => {
     expect(result.content[0].text).toContain("Hello world");
     expect(result.content[0].text).toContain("[UNTRUSTED_EMAIL_CONTENT]");
     expect(result.content[0].text).toContain("[UNTRUSTED_SUBJECT]");
+    expect(result.structuredContent).toEqual({
+      schemaVersion: "1.0",
+      message: expect.objectContaining({ id: "msg-1", body: "Hello world" }),
+    });
+  });
+
+  it("returns schema-compatible structured content when a structured tool fails", async () => {
+    vi.mocked(mockProvider.searchMessages).mockRejectedValueOnce(new Error("mail service unavailable"));
+
+    const result = await handleToolCall("search_emails", { account: "personal", query: "from:sender" }, ctx);
+
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        schemaVersion: "1.0",
+        error: { code: "tool_execution_failed", message: "mail service unavailable" },
+      },
+    });
   });
 
   it("read_thread fences body and subject at MCP exit", async () => {

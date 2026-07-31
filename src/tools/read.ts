@@ -1,5 +1,34 @@
-import { registerTool } from "./registry.js";
+import { registerTool, toolErrorSchema } from "./registry.js";
 import { fenceEmailContent, fenceEmailHeader } from "../security/sanitize.js";
+
+const attachmentSchema = {
+  type: "object" as const,
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" as const },
+    filename: { type: "string" as const },
+    mimeType: { type: "string" as const },
+    size: { type: "number" as const },
+  },
+  required: ["id", "filename", "mimeType", "size"],
+};
+
+const emailSummarySchema = {
+  type: "object" as const,
+  additionalProperties: false,
+  properties: {
+    id: { type: "string" as const },
+    threadId: { type: "string" as const },
+    from: { type: "string" as const },
+    to: { type: "array" as const, items: { type: "string" as const } },
+    subject: { type: "string" as const },
+    snippet: { type: "string" as const },
+    date: { type: "string" as const },
+    labels: { type: "array" as const, items: { type: "string" as const } },
+    hasAttachments: { type: "boolean" as const },
+  },
+  required: ["id", "from", "to", "subject", "snippet", "date", "labels", "hasAttachments"],
+};
 
 registerTool(
   {
@@ -15,6 +44,17 @@ registerTool(
       },
       required: ["account", "query"],
     },
+    outputSchema: {
+      type: "object" as const,
+      additionalProperties: false,
+      properties: {
+        schemaVersion: { type: "string" as const, const: "1.0" },
+        messages: { type: "array" as const, items: emailSummarySchema },
+        error: toolErrorSchema,
+      },
+      required: ["schemaVersion"],
+      oneOf: [{ required: ["messages"] }, { required: ["error"] }],
+    },
   },
   async (args, ctx) => {
     const provider = await ctx.getProvider(args.account as string);
@@ -23,9 +63,12 @@ registerTool(
       (args.max_results as number) ?? 20,
       args.folder as string | undefined,
     );
-    if (results.length === 0) return { content: [{ type: "text", text: "No messages found." }] };
+    const structuredContent = { schemaVersion: "1.0", messages: results };
+    if (results.length === 0) {
+      return { content: [{ type: "text", text: "No messages found." }], structuredContent };
+    }
     const lines = results.map((m) => `**${m.id}** | ${fenceEmailHeader(m.from, "from")} | ${fenceEmailContent(m.subject, "subject")}\n  ${fenceEmailContent(m.snippet)} (${m.date})`);
-    return { content: [{ type: "text", text: lines.join("\n\n") }] };
+    return { content: [{ type: "text", text: lines.join("\n\n") }], structuredContent };
   }
 );
 
@@ -41,6 +84,28 @@ registerTool(
       },
       required: ["account", "message_id"],
     },
+    outputSchema: {
+      type: "object" as const,
+      additionalProperties: false,
+      properties: {
+        schemaVersion: { type: "string" as const, const: "1.0" },
+        message: {
+          ...emailSummarySchema,
+          properties: {
+            ...emailSummarySchema.properties,
+            body: { type: "string" as const },
+            cc: { type: "array" as const, items: { type: "string" as const } },
+            bcc: { type: "array" as const, items: { type: "string" as const } },
+            replyTo: { type: "string" as const },
+            attachments: { type: "array" as const, items: attachmentSchema },
+          },
+          required: [...emailSummarySchema.required, "body", "cc", "bcc", "attachments"],
+        },
+        error: toolErrorSchema,
+      },
+      required: ["schemaVersion"],
+      oneOf: [{ required: ["message"] }, { required: ["error"] }],
+    },
   },
   async (args, ctx) => {
     const provider = await ctx.getProvider(args.account as string);
@@ -52,7 +117,10 @@ registerTool(
       msg.attachments.length ? `**Attachments:** ${msg.attachments.map((a) => `${fenceEmailHeader(a.filename, "filename")} (${a.id})`).join(", ")}` : "",
       "", fenceEmailContent(msg.body),
     ].filter(Boolean).join("\n");
-    return { content: [{ type: "text", text }] };
+    return {
+      content: [{ type: "text", text }],
+      structuredContent: { schemaVersion: "1.0", message: msg },
+    };
   }
 );
 

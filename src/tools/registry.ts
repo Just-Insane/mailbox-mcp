@@ -11,6 +11,7 @@ export interface ToolContext {
 export interface ToolHandler {
   (args: Record<string, unknown>, ctx: ToolContext): Promise<{
     content: Array<{ type: "text"; text: string }>;
+    structuredContent?: Record<string, unknown>;
     isError?: boolean;
   }>;
 }
@@ -80,7 +81,11 @@ export async function handleToolCall(
   name: string,
   args: Record<string, unknown>,
   ctx: ToolContext
-): Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }> {
+): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+}> {
   const tool = tools.find((t) => t.definition.name === name);
   if (!tool) {
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };

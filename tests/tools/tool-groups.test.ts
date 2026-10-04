@@ -6,6 +6,7 @@ import "../../src/tools/write.js";
 import "../../src/tools/manage.js";
 import "../../src/tools/gmail-only.js";
 import "../../src/tools/attachments.js";
+import "../../src/tools/proton-attachment.js";
 import "../../src/tools/actions.js";
 import "../../src/tools/export.js";
 

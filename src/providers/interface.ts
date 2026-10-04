@@ -136,6 +136,10 @@ export interface MailProvider {
   batchModifyLabels(messageIds: string[], add: string[], remove: string[]): Promise<void>;
 
   downloadAttachment(messageId: string, attachmentId: string): Promise<{ filename: string; data: Buffer; mimeType: string }>;
+  /** Private programmatic cohort only; expected epoch comes from the parent, never this response. */
+  readAttachmentBounded?(messageId: string, partId: string, expectedUidValidity: string,
+    maxBytes: number): Promise<{ folder: string; uid: number; uidValidity: string;
+      partId: string; filename: string; mimeType: string; data: Buffer }>;
   inboxSummary(): Promise<{ total: number; unread: number; recent: EmailSummary[] }>;
 
   markRead(messageId: string, read: boolean): Promise<void>;

@@ -505,6 +505,11 @@ export class ImapProvider implements MailProvider {
       if (candidates.length !== 1) throw new Error("Exact attachment candidate unavailable or ambiguous");
       const node = candidates[0];
       const mimeType = nodeMimeType(node);
+      // ImapFlow normalizes inline/no-disposition text (flowed lines and
+      // charset). Explicit attachment disposition preserves transfer-decoded
+      // original bytes; reject the broader filename-only TXT cohort first.
+      if (mimeType === "text/plain" && node.disposition !== "attachment")
+        throw new Error("TXT part must have explicit attachment disposition");
       if (mimeType !== "text/plain" && mimeType !== "application/pdf")
         throw new Error("Attachment format outside TXT/PDF cohort");
       const filename = attachmentFilename(node);

@@ -48,6 +48,14 @@ describe("bounded Proton IMAP attachment", () => {
     await expect(f.read("INBOX:7", "2", "42", 65536)).rejects.toThrow();
     expect(f.imap.download).not.toHaveBeenCalled();
   });
+  it.each(["inline",undefined])("rejects filename-bearing flowed text with disposition %s before a transforming download",async disposition=>{
+    const f=fixture(Buffer.from("original soft \r\nline\r\n"));
+    const structure=(await f.imap.fetchOne()).bodyStructure;
+    structure.childNodes[1].disposition=disposition as any;
+    (structure.childNodes[1] as any).parameters={charset:"UTF-8",format:"flowed"};
+    await expect(f.read("INBOX:7","2","42",65536)).rejects.toThrow();
+    expect(f.imap.download).not.toHaveBeenCalled();
+  });
   it("cancels an oversized decoded stream before returning accumulated bytes", async () => {
     const f = fixture(Buffer.alloc(65537));
     await expect(f.read("INBOX:7", "2", "42", 65536)).rejects.toThrow(/limit|large/i);

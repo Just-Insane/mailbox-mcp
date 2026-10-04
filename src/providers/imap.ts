@@ -484,6 +484,61 @@ export class ImapProvider implements MailProvider {
     }
   }
 
+  async readAttachmentBounded(messageId: string, partId: string, expectedUidValidity: string,
+    maxBytes: number) {
+    const identity = /^([^\x00-\x1f\x7f]{1,256}):([1-9][0-9]{0,9})$/.exec(messageId);
+    if (!identity || !/^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/.test(partId) || partId.length > 64 ||
+        typeof expectedUidValidity !== "string" || !/^[1-9][0-9]{0,9}$/.test(expectedUidValidity) ||
+        !Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 2 * 1024 * 1024)
+      throw new Error("Attachment identity or byte limit is invalid");
+    const folder = identity[1], uid = Number(identity[2]);
+    if (uid > 4294967295 || Number(expectedUidValidity) > 4294967295)
+      throw new Error("Attachment identity is invalid");
+    const lock = await this.imap.getMailboxLock(folder, { readOnly: true });
+    try {
+      const mailbox = this.imap.mailbox;
+      if (!mailbox || String(mailbox.uidValidity) !== expectedUidValidity)
+        throw new Error("Parent mailbox epoch mismatch");
+      const meta = await this.imap.fetchOne(uid, { bodyStructure: true, uid: true }, { uid: true });
+      if (!meta || meta.uid !== uid) throw new Error("Exact parent message unavailable");
+      const candidates = collectAttachmentNodes(meta.bodyStructure).filter(node => node.part === partId);
+      if (candidates.length !== 1) throw new Error("Exact attachment candidate unavailable or ambiguous");
+      const node = candidates[0];
+      const mimeType = nodeMimeType(node);
+      // ImapFlow normalizes inline/no-disposition text (flowed lines and
+      // charset). Explicit attachment disposition preserves transfer-decoded
+      // original bytes; reject the broader filename-only TXT cohort first.
+      if (mimeType === "text/plain" && node.disposition !== "attachment")
+        throw new Error("TXT part must have explicit attachment disposition");
+      if (mimeType !== "text/plain" && mimeType !== "application/pdf")
+        throw new Error("Attachment format outside TXT/PDF cohort");
+      const filename = attachmentFilename(node);
+      if (typeof filename !== "string" || filename.length < 1 || filename.length > 256 ||
+          /[\x00-\x1f\x7f/\\]/.test(filename)) throw new Error("Attachment filename invalid");
+      const decodedLimit = mimeType === "text/plain" ? Math.min(maxBytes, 65536) : maxBytes;
+      const download = await this.imap.download(uid, partId, { uid: true });
+      if (!download?.content) throw new Error("Attachment stream unavailable");
+      const chunks: Buffer[] = [];
+      let size = 0;
+      try {
+        for await (const chunk of download.content) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (size + bytes.length > decodedLimit) {
+            download.content.destroy();
+            throw new Error("Decoded attachment exceeds byte limit");
+          }
+          size += bytes.length; chunks.push(bytes);
+        }
+      } catch (error) {
+        download.content.destroy(); throw error;
+      }
+      if (!this.imap.mailbox || String(this.imap.mailbox.uidValidity) !== expectedUidValidity)
+        throw new Error("Parent mailbox epoch changed during read");
+      return { folder, uid, uidValidity: expectedUidValidity, partId, filename, mimeType,
+        data: Buffer.concat(chunks, size) };
+    } finally { lock.release(); }
+  }
+
   async downloadAttachment(messageId: string, attachmentId: string): Promise<{ filename: string; data: Buffer; mimeType: string }> {
     const { folder, uid } = parseImapMessageId(messageId);
     const lock = await this.imap.getMailboxLock(folder);

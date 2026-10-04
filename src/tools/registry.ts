@@ -6,6 +6,12 @@ export interface ToolContext {
   accountManager: AccountManager;
   getProvider: (alias: string) => MailProvider | Promise<MailProvider>;
   clearProviderCache?: (alias: string) => void;
+  /** Internal trusted route context. Never populated from MCP arguments or generic stdio env. */
+  protonAttachment?: {
+    programmaticRoute: "pcp-authenticated";
+    selection: { account: string; message_id: string; part_id: string;
+      expected_uid_validity: string; format: "txt" | "pdf" };
+  };
 }
 
 export interface ToolHandler {
@@ -59,7 +65,8 @@ export const TOOL_GROUPS: Record<string, string> = {
   modify_email: "organize", batch_modify_emails: "organize", star_email: "organize",
   archive_email: "organize", trash_emails: "organize", count_unread_by_label: "organize",
   bulk_modify: "bulk", bulk_trash: "bulk", list_recent_bulk_ops: "bulk", undo_bulk_op: "bulk",
-  download_attachment: "attachments", export_email: "attachments", export_thread: "attachments",
+  download_attachment: "attachments", read_proton_attachment: "attachments",
+  export_email: "attachments", export_thread: "attachments",
   create_filter: "gmail-extras", list_filters: "gmail-extras", delete_filter: "gmail-extras",
   save_template: "gmail-extras", list_templates: "gmail-extras", delete_template: "gmail-extras",
   send_template: "gmail-extras", get_signature: "gmail-extras", set_signature: "gmail-extras",
@@ -79,8 +86,19 @@ function isToolEnabled(name: string): boolean {
   return groups.has(TOOL_GROUPS[name] ?? "core");
 }
 
-export function getAllToolDefinitions(): Tool[] {
-  return tools.filter((t) => isToolEnabled(t.definition.name)).map((t) => t.definition);
+export function hasPrivateAttachmentRoute(ctx?: ToolContext): boolean {
+  const policy = ctx?.protonAttachment, selection = policy?.selection;
+  return policy?.programmaticRoute === "pcp-authenticated" && !!selection &&
+    /^[A-Za-z0-9._-]{1,64}$/.test(selection.account) &&
+    /^[^\x00-\x1f\x7f]{1,256}:[1-9][0-9]{0,9}$/.test(selection.message_id) &&
+    /^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/.test(selection.part_id) && selection.part_id.length <= 64 &&
+    /^[1-9][0-9]{0,9}$/.test(selection.expected_uid_validity) &&
+    (selection.format === "txt" || selection.format === "pdf");
+}
+
+export function getAllToolDefinitions(ctx?: ToolContext): Tool[] {
+  return tools.filter(t => isToolEnabled(t.definition.name) &&
+    (t.definition.name !== "read_proton_attachment" || hasPrivateAttachmentRoute(ctx))).map(t => t.definition);
 }
 
 export function sanitizeErrorMessage(message: string, redactTokens: (s: string) => string): string {
@@ -115,6 +133,8 @@ export async function handleToolCall(
   if (!tool) {
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
   }
+  if (name === "read_proton_attachment" && !hasPrivateAttachmentRoute(ctx))
+    return errorResult(tool, "Private programmatic attachment route unavailable");
   if (!isToolEnabled(name)) {
     return errorResult(
       tool,

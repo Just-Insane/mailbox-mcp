@@ -59,4 +59,9 @@ describe("private attachment tool", () => {
     const result = await handleToolCall("read_proton_attachment", selection, f.ctx);
     expect(result.isError).not.toBe(true); expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(3500000);
   });
+  it("preserves a zero-byte attachment handoff",async()=>{
+    const f=context();f.provider.readAttachmentBounded.mockResolvedValue({folder:"INBOX",uid:7,uidValidity:"42",partId:"2",filename:"empty.txt",mimeType:"text/plain",data:Buffer.alloc(0)});
+    const result=await handleToolCall("read_proton_attachment",request,f.ctx);
+    expect(result.isError).not.toBe(true);expect(result.structuredContent).toMatchObject({size:0,base64:"",sha256:createHash("sha256").update(Buffer.alloc(0)).digest("hex")});
+  });
 });

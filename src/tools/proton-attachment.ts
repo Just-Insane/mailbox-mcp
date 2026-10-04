@@ -28,7 +28,7 @@ registerTool({
     args.part_id as string, args.expected_uid_validity as string, limit);
   if (`${result.folder}:${result.uid}` !== args.message_id || result.partId !== args.part_id ||
       result.uidValidity !== args.expected_uid_validity || !Buffer.isBuffer(result.data) ||
-      result.data.length < 1 || result.data.length > limit ||
+      result.data.length > limit ||
       result.mimeType !== (args.format === "txt" ? "text/plain" : "application/pdf") ||
       typeof result.filename !== "string" || result.filename.length < 1 || result.filename.length > 256 ||
       /[\x00-\x1f\x7f/\\]/.test(result.filename)) throw new Error("Attachment response outside trusted cohort");

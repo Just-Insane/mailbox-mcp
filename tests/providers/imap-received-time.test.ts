@@ -62,6 +62,20 @@ describe("IMAP received-time polling", () => {
     expect(client.getMailboxLock).toHaveBeenCalledWith("Archive", { readOnly: true });
   });
 
+  it('preserves years below 100 in the candidate search', async () => {
+    const { provider, client } = harness([]);
+    await provider.messagesSince('0099-10-05T12:00:00Z');
+    expect(client.search).toHaveBeenCalledWith({ since: new Date('0099-10-04T00:00:00Z') }, { uid: true });
+  });
+
+  it('includes a received instant whose original timezone has a prior calendar day', async () => {
+    const { provider, client } = harness([row(1, new Date('2026-10-04T23:45:00-02:00'))]);
+    expect((await provider.messagesSince('2026-10-05T00:30:00Z'))[0].date).toBe('2026-10-05T01:45:00.000Z');
+    expect(client.fetchAll).toHaveBeenCalledWith([1], {
+      envelope: true, flags: true, bodyStructure: true, uid: true, internalDate: true,
+    }, { uid: true });
+  });
+
   it.each([0, -1, 1.5, NaN])("rejects an invalid cap %s before accessing IMAP", async cap => {
     const { provider, client } = harness([]);
     await expect(provider.messagesSince(cutoff, "INBOX", cap)).rejects.toThrow("Invalid maxResults");

@@ -702,7 +702,9 @@ export class ImapProvider implements MailProvider {
       // both call sites so the pipeline is UID-based end to end.
       // SINCE compares calendar dates, including the message's timezone. Start
       // one UTC day earlier and enforce the precise instant on INTERNALDATE.
-      const candidateDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - 1));
+      const candidateDay = new Date(date);
+      candidateDay.setUTCHours(0, 0, 0, 0);
+      candidateDay.setUTCDate(candidateDay.getUTCDate() - 1);
       const uids = ((await this.imap.search({ since: candidateDay }, { uid: true })) || []).sort((a, b) => b - a);
       const messages: any[] = [];
       for (let offset = 0; offset < uids.length && messages.length < maxResults; offset += 100) {

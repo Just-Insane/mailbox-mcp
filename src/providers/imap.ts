@@ -694,24 +694,37 @@ export class ImapProvider implements MailProvider {
   async messagesSince(since: string, folder: string = "INBOX", maxResults: number = 50): Promise<EmailSummary[]> {
     const date = new Date(since);
     if (Number.isNaN(date.getTime())) throw new Error(`Invalid since timestamp: ${since}`);
-    const lock = await this.imap.getMailboxLock(folder);
+    if (!Number.isSafeInteger(maxResults) || maxResults < 1) throw new Error("Invalid maxResults");
+    const lock = await this.imap.getMailboxLock(folder, { readOnly: true });
     try {
       // Same UID/seq mismatch as searchByText: search() returns seq nums by
       // default, fetchAll then treats them as UIDs. Pass { uid: true } at
       // both call sites so the pipeline is UID-based end to end.
-      const uids = (await this.imap.search({ since: date }, { uid: true })) || [];
-      const limited = uids.slice(-maxResults).reverse();
-      if (limited.length === 0) return [];
-      const messages = await this.imap.fetchAll(limited, {
-        envelope: true, flags: true, bodyStructure: true, uid: true,
-      }, { uid: true });
+      // SINCE compares calendar dates, including the message's timezone. Start
+      // one UTC day earlier and enforce the precise instant on INTERNALDATE.
+      const candidateDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - 1));
+      const uids = ((await this.imap.search({ since: candidateDay }, { uid: true })) || []).sort((a, b) => b - a);
+      const messages: any[] = [];
+      for (let offset = 0; offset < uids.length && messages.length < maxResults; offset += 100) {
+        const batch = await this.imap.fetchAll(uids.slice(offset, offset + 100), {
+          envelope: true, flags: true, bodyStructure: true, uid: true, internalDate: true,
+        }, { uid: true });
+        batch.sort((a, b) => b.uid - a.uid);
+        for (const msg of batch) {
+          if (!(msg.internalDate instanceof Date) || !Number.isFinite(msg.internalDate.getTime())) {
+            throw new Error("Invalid IMAP internalDate");
+          }
+          if (msg.internalDate.getTime() > date.getTime()) messages.push(msg);
+          if (messages.length === maxResults) break;
+        }
+      }
       return messages.map((msg: any) => ({
         id: `${folder}:${msg.uid}`,
         from: formatAddress(msg.envelope?.from?.[0]),
         to: formatAddresses(msg.envelope?.to),
         subject: msg.envelope?.subject ?? "",
         snippet: "",
-        date: msg.envelope?.date?.toISOString() ?? "",
+        date: msg.internalDate.toISOString(),
         labels: [],
         hasAttachments: (msg.bodyStructure?.childNodes?.length ?? 0) > 0,
       }));

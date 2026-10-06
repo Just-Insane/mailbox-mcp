@@ -335,8 +335,8 @@ describe("ImapProvider", () => {
     const since = "2026-05-01T00:00:00Z";
     mockImap.search.mockResolvedValue([17, 23]);
     mockImap.fetchAll.mockResolvedValue([
-      { uid: 23, envelope: { from: [{ address: "a@x" }], to: [], subject: "x", date: new Date(0) }, bodyStructure: { childNodes: [] } },
-      { uid: 17, envelope: { from: [{ address: "b@x" }], to: [], subject: "y", date: new Date(0) }, bodyStructure: { childNodes: [] } },
+      { uid: 23, internalDate: new Date("2026-05-01T01:00:00Z"), envelope: { from: [{ address: "a@x" }], to: [], subject: "x", date: new Date(0) }, bodyStructure: { childNodes: [] } },
+      { uid: 17, internalDate: new Date("2026-05-01T01:00:00Z"), envelope: { from: [{ address: "b@x" }], to: [], subject: "y", date: new Date(0) }, bodyStructure: { childNodes: [] } },
     ]);
 
     const results = await provider.messagesSince(since);

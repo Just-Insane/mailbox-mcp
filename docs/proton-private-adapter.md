@@ -14,7 +14,14 @@ const handle = createProtonPrivateHandler({
 ```
 
 `GatewayVerifier(request, signal)` must obtain an authenticated identity from
-the existing gateway and return `{principal, audience}` or `null`. It must not
+the existing gateway and return `{principal, audience, requestTarget}` or `null`.
+`requestTarget` must be captured by the host **before** constructing a WHATWG
+`Request` or `URL`, which normalize dot segments and encoded-dot aliases. The
+verifier must carry that original target through its trusted closure and require
+the gateway to authorize the same canonical path and `POST` method. Never derive
+it from `Request.url` or caller-controlled headers. Missing original-target proof
+or any target other than the exact canonical operation path denies before a
+provider can be constructed, even if the normalized URL matches. It must not
 consume the request body. The adapter never trusts identity headers directly,
 implements no bearer checker, and provisions no caller or credential. Missing
 verifier/context/policy, wrong identity/audience, expired policy, or a missing

@@ -4,6 +4,12 @@ import {createProtonPrivateHandler,type ProtonPrivatePolicy} from '../src/privat
 const now=Date.parse('2026-10-15T12:00:00Z');
 const metadataSelection={account:'proton',message_id:'INBOX:7',limit:20};
 const attachmentSelection={account:'proton',message_id:'INBOX:7',part_id:'2',expected_uid_validity:'42',format:'txt' as const};
+// Synthetic host evidence captured from the original target, never Request.url or headers.
+const originalTargets=new WeakMap<Request,string>();
+function rawRequest(target:string,body:unknown=metadataSelection){
+ const req=new Request(`https://private.example${target}`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+ originalTargets.set(req,target);return req;
+}
 function fixture(){
  const metadata={folder:'INBOX',uid:7,uidValidity:'42',envelope:{internetMessageId:null,date:null,internalDate:'2026-10-15T12:00:00.000Z',from:'sender@example.invalid',to:[],cc:[],subject:'Synthetic',messageSize:100},
   attachments:[{partId:'2',filename:'note.txt',mimeType:'text/plain',encodedSizeBytes:42,disposition:'attachment'}],limit:20,truncated:false};
@@ -13,12 +19,11 @@ function fixture(){
  const getProvider=vi.fn(async()=>provider);
  const policy:ProtonPrivatePolicy={status:'qualified',principal:'existing-principal',audience:'existing-audience',receiptReference:'synthetic-receipt',
   expiresAt:'2026-10-15T13:00:00.000Z',metadataSelection:{...metadataSelection},attachmentSelection:{...attachmentSelection}};
- const verifyGateway=vi.fn(async()=>({principal:'existing-principal',audience:'existing-audience'}));
+ const verifyGateway=vi.fn(async(req:Request)=>({principal:'existing-principal',audience:'existing-audience',requestTarget:originalTargets.get(req)!}));
  const options={policy,verifyGateway,context:{accountManager:{} as any,getProvider:getProvider as any},now:()=>now};
  return {provider,getProvider,policy,verifyGateway,options,bytes};
 }
-const request=(operation='metadata',body:unknown=metadataSelection)=>new Request(`https://private.example/v1/private/proton/${operation}`,{
- method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+const request=(operation='metadata',body:unknown=metadataSelection)=>rawRequest(`/v1/private/proton/${operation}`,body);
 afterEach(()=>{vi.useRealTimers();delete process.env.MAILBOX_MCP_TOOLS;});
 describe('private Proton HTTP adapter',()=>{
  it('verifies gateway identity and returns existing metadata structured content only',async()=>{
@@ -38,12 +43,26 @@ describe('private Proton HTTP adapter',()=>{
   if(mode==='verifier')delete options.verifyGateway;if(mode==='policy')delete options.policy;if(mode==='context')delete options.context;
   if(mode==='qualification')(f.policy as any).status='proposed';if(mode==='expired')f.policy.expiresAt='2026-10-15T12:00:00.000Z';
   if(mode==='selection')delete f.policy.metadataSelection;if(mode==='receipt')f.policy.receiptReference='';
-  if(mode==='principal')f.verifyGateway.mockResolvedValue({principal:'wrong',audience:'existing-audience'});
-  if(mode==='audience')f.verifyGateway.mockResolvedValue({principal:'existing-principal',audience:'wrong'});
+  if(mode==='principal')f.verifyGateway.mockResolvedValue({principal:'wrong',audience:'existing-audience',requestTarget:'/v1/private/proton/metadata'});
+  if(mode==='audience')f.verifyGateway.mockResolvedValue({principal:'existing-principal',audience:'wrong',requestTarget:'/v1/private/proton/metadata'});
   expect((await createProtonPrivateHandler(options)(request())).status).not.toBe(200);expect(f.getProvider).not.toHaveBeenCalled();
  });
  it('never accepts identity headers or a caller-declared authority',async()=>{
   const f=fixture();f.verifyGateway.mockResolvedValue(null as any);const req=request();req.headers.set('x-principal','existing-principal');req.headers.set('x-audience','existing-audience');
+  expect((await createProtonPrivateHandler(f.options)(req)).status).toBe(403);expect(f.getProvider).not.toHaveBeenCalled();
+ });
+ it.each(['/v1/private/proton/x/../metadata','/v1/private/proton/%2e/metadata','/v1/private/proton/x/%2E%2E/metadata'])('denies normalized route alias %s before provider construction',async target=>{
+  const f=fixture();const req=rawRequest(target);expect(new URL(req.url).pathname).toBe('/v1/private/proton/metadata');
+  expect((await createProtonPrivateHandler(f.options)(req)).status).toBe(403);expect(f.getProvider).not.toHaveBeenCalled();
+ });
+ it('denies encoded-dot attachment aliases despite matching byte selections',async()=>{
+  const f=fixture();const req=rawRequest('/v1/private/proton/x/%2e%2e/attachment',attachmentSelection);
+  expect(new URL(req.url).pathname).toBe('/v1/private/proton/attachment');
+  expect((await createProtonPrivateHandler(f.options)(req)).status).toBe(403);expect(f.getProvider).not.toHaveBeenCalled();
+ });
+ it.each([undefined,'/v1/private/proton/attachment','/v1/private/proton/metadata?x=1'])('denies absent or mismatched verified original target: %s',async target=>{
+  const f=fixture();f.verifyGateway.mockResolvedValue({principal:'existing-principal',audience:'existing-audience',requestTarget:target} as any);
+  const req=request();req.headers.set('x-original-url','/v1/private/proton/metadata');
   expect((await createProtonPrivateHandler(f.options)(req)).status).toBe(403);expect(f.getProvider).not.toHaveBeenCalled();
  });
  it.each(['metadata','attachment'])('does not authorize %s through the other operation selection',async operation=>{
@@ -94,7 +113,7 @@ describe('private Proton HTTP adapter',()=>{
  });
  it('rechecks expiry after gateway verification before constructing the provider',async()=>{
   const f=fixture();let clock=now;f.options.now=()=>clock;
-  f.verifyGateway.mockImplementation(async()=>{clock=now+3600001;return {principal:'existing-principal',audience:'existing-audience'};});
+  f.verifyGateway.mockImplementation(async()=>{clock=now+3600001;return {principal:'existing-principal',audience:'existing-audience',requestTarget:'/v1/private/proton/metadata'};});
   expect((await createProtonPrivateHandler(f.options)(request())).status).not.toBe(200);expect(f.getProvider).not.toHaveBeenCalled();
  });
  it('withholds a late provider result and starts no operation after timeout',async()=>{
@@ -108,6 +127,7 @@ describe('private Proton HTTP adapter',()=>{
   vi.useFakeTimers();const f=fixture();const cancel=vi.fn();
   const stream=new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode('{'));},cancel});
   const req=new Request('https://private.example/v1/private/proton/metadata',{method:'POST',headers:{'content-type':'application/json'},body:stream,duplex:'half'} as RequestInit);
+  originalTargets.set(req,'/v1/private/proton/metadata');
   const pending=createProtonPrivateHandler(f.options)(req);await vi.advanceTimersByTimeAsync(30000);
   expect((await pending).status).toBe(504);expect(cancel).toHaveBeenCalledOnce();expect(f.getProvider).not.toHaveBeenCalled();
  });

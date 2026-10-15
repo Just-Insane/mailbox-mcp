@@ -2,7 +2,11 @@ import {handleToolCall, hasPrivateAttachmentRoute, hasPrivateAttachmentMetadataR
 import "./tools/proton-attachment.js";
 import "./tools/proton-attachment-metadata.js";
 
-export interface GatewayIdentity {principal: string; audience: string}
+export interface GatewayIdentity {
+  principal: string; audience: string;
+  /** Original host request-target captured before WHATWG Request/URL normalization. */
+  requestTarget: string;
+}
 /** Supplied by the existing authenticated gateway; caller headers are not identity. */
 export type GatewayVerifier = (request: Request, signal: AbortSignal) => Promise<GatewayIdentity | null>;
 export interface ProtonPrivatePolicy {
@@ -79,6 +83,7 @@ export function createProtonPrivateHandler(options: ProtonPrivateHandlerOptions 
     const operation = url.pathname === "/v1/private/proton/metadata" ? "metadata" :
       url.pathname === "/v1/private/proton/attachment" ? "attachment" : null;
     if (!operation) return response({error: "NOT_FOUND"}, 404);
+    const canonicalTarget = operation === "metadata" ? "/v1/private/proton/metadata" : "/v1/private/proton/attachment";
     if (url.search || url.hash) return response({error: "INVALID_REQUEST"}, 400);
     if (request.method !== "POST") return response({error: "METHOD_NOT_ALLOWED"}, 405);
     const abort = new AbortController(); let timedOut = false;
@@ -113,7 +118,8 @@ export function createProtonPrivateHandler(options: ProtonPrivateHandlerOptions 
       });
       const run = async () => {
         const identity = await verify(request, abort.signal); assertActive();
-        if (!identity || identity.principal !== policy.principal || identity.audience !== policy.audience) throw denied();
+        if (!identity || identity.principal !== policy.principal || identity.audience !== policy.audience ||
+            identity.requestTarget !== canonicalTarget) throw denied();
         const input = await readJson(request, abort.signal); assertActive();
         // Only this operation's independently fixed policy can create its private tool context.
         const result = await handleToolCall(operation === "metadata" ? "inspect_proton_attachment_metadata" : "read_proton_attachment", input, context);

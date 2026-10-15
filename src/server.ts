@@ -56,6 +56,7 @@ import "./tools/gmail-only.js";
 import "./tools/attachments.js";
 // Registered but hidden/uncallable on this generic stdio transport. No route attestation is available here.
 import "./tools/proton-attachment.js";
+import "./tools/proton-attachment-metadata.js";
 import "./tools/actions.js";
 import "./tools/export.js";
 

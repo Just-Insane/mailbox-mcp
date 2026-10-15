@@ -3,6 +3,9 @@ import type { Transporter } from "nodemailer";
 import { stripCRLF } from "../security/validation.js";
 import { buildRawMimeMessage } from "./mime.js";
 import { ensureReplyPrefix, ensureForwardPrefix } from "./headers.js";
+import {metadataIdentity, metadataEpoch, metadataLimit, metadataText, metadataDate, validateAttachmentMetadata,
+  validateAttachmentMetadataPart,
+  type AttachmentMetadataOptions, type AttachmentMetadata} from "./proton-attachment-metadata.js";
 import type {
   MailProvider, ProviderCapabilities, EmailSummary, EmailMessage,
   EmailThread, Label, SendOptions, ReplyOptions, ForwardOptions,
@@ -151,13 +154,27 @@ function attachmentFilename(node: any): string | undefined {
 }
 
 /** Flatten a bodyStructure into the leaf nodes that look like attachments. */
-function collectAttachmentNodes(node: any, out: any[] = []): any[] {
-  if (!node) return out;
+function collectAttachmentNodes(node: any, out: any[] = [], bounds?: {remaining: number}, depth = 0): any[] {
+  if (!node) {
+    if (bounds) throw new Error("Proton attachment structure invalid");
+    return out;
+  }
+  if (bounds) {
+    if (--bounds.remaining < 0 || depth > 32 || typeof node !== "object" || Array.isArray(node) ||
+        (node.childNodes !== undefined && (!Array.isArray(node.childNodes) || node.childNodes.length > 1000)))
+      throw new Error("Proton attachment structure outside metadata bounds");
+    metadataText(node.type, 256, false);
+    if (node.subtype !== undefined) metadataText(node.subtype, 128);
+    if (node.disposition !== undefined) metadataText(node.disposition, 32);
+    if (node.part !== undefined) metadataText(node.part, 64);
+  }
   const isAttachment =
     node.disposition === "attachment" ||
     (node.part && attachmentFilename(node) && !nodeMimeType(node).startsWith("multipart/"));
+  if (bounds && !node.part && (isAttachment || (attachmentFilename(node) && !nodeMimeType(node).startsWith("multipart/"))))
+    throw new Error("Proton metadata attachment part missing");
   if (isAttachment && node.part) out.push(node);
-  for (const child of node.childNodes ?? []) collectAttachmentNodes(child, out);
+  for (const child of node.childNodes ?? []) collectAttachmentNodes(child, out, bounds, depth + 1);
   return out;
 }
 
@@ -482,6 +499,49 @@ export class ImapProvider implements MailProvider {
     for (const id of messageIds) {
       await this.modifyLabels(id, add, remove);
     }
+  }
+
+  async inspectAttachmentMetadata(messageId: string, options: AttachmentMetadataOptions = {}): Promise<AttachmentMetadata> {
+    const {folder, uid} = metadataIdentity(messageId);
+    if (!options || typeof options !== "object" || Array.isArray(options) ||
+        Object.keys(options).some(key => key !== "limit" && key !== "expectedUidValidity"))
+      throw new Error("Proton metadata options invalid");
+    const limit = metadataLimit(options.limit === undefined ? 20 : options.limit);
+    const expected = options.expectedUidValidity === undefined ? undefined : metadataEpoch(options.expectedUidValidity);
+    const lock = await this.imap.getMailboxLock(folder, {readOnly: true});
+    try {
+      const epoch = metadataEpoch(this.imap.mailbox ? String(this.imap.mailbox.uidValidity) : undefined);
+      if (expected !== undefined && expected !== epoch) throw new Error("Proton metadata parent epoch mismatch");
+      const meta = await this.imap.fetchOne(uid, {uid: true, envelope: true, internalDate: true, size: true, bodyStructure: true}, {uid: true});
+      if (!meta || meta.uid !== uid || !meta.bodyStructure || !meta.envelope) throw new Error("Proton metadata exact parent unavailable");
+      const addressList = (value: any) => {
+        if (value === undefined) return [];
+        if (!Array.isArray(value) || value.length > 64) throw new Error("Proton metadata addresses outside bounds");
+        return value.map(address => {
+          if (!address || typeof address !== "object" || Array.isArray(address)) throw new Error("Proton metadata address invalid");
+          if (address.name !== undefined) metadataText(address.name, 4096);
+          if (address.address !== undefined) metadataText(address.address, 4096);
+          return metadataText(formatAddress(address), 4096);
+        });
+      };
+      const candidates = collectAttachmentNodes(meta.bodyStructure, [], {remaining: 1000});
+      const attachments = candidates.map(node => validateAttachmentMetadataPart({partId: node.part, filename: attachmentFilename(node) ?? null,
+        mimeType: nodeMimeType(node), encodedSizeBytes: node.size ?? null, disposition: node.disposition ?? null}));
+      // Validate all bounded candidates before truncation, including duplicate part IDs.
+      const candidateMetadata = {folder, uid, uidValidity: epoch, envelope: {
+        internetMessageId: meta.envelope.messageId ?? null, date: metadataDate(meta.envelope.date),
+        internalDate: metadataDate(meta.internalDate, true)!, from: addressList(meta.envelope.from).join(", "),
+        to: addressList(meta.envelope.to), cc: addressList(meta.envelope.cc), subject: meta.envelope.subject ?? "", messageSize: meta.size},
+        attachments: attachments.slice(0, limit), limit, truncated: attachments.length > limit};
+      const seen = new Set<string>();
+      for (const attachment of attachments) {
+        if (seen.has(attachment.partId)) throw new Error("Proton metadata duplicate attachment part");
+        seen.add(attachment.partId);
+      }
+      const result = validateAttachmentMetadata(candidateMetadata);
+      if (!this.imap.mailbox || String(this.imap.mailbox.uidValidity) !== epoch) throw new Error("Proton metadata epoch changed during inspection");
+      return result;
+    } finally { lock.release(); }
   }
 
   async readAttachmentBounded(messageId: string, partId: string, expectedUidValidity: string,

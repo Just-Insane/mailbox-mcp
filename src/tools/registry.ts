@@ -1,6 +1,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { MailProvider, ProviderCapabilities } from "../providers/interface.js";
 import type { AccountManager } from "../accounts.js";
+import {metadataIdentity, metadataEpoch, metadataLimit} from "../providers/proton-attachment-metadata.js";
 
 export interface ToolContext {
   accountManager: AccountManager;
@@ -11,6 +12,11 @@ export interface ToolContext {
     programmaticRoute: "pcp-authenticated";
     selection: { account: string; message_id: string; part_id: string;
       expected_uid_validity: string; format: "txt" | "pdf" };
+  };
+  /** Independent exact-parent metadata selection; never grants attachment bytes. */
+  protonAttachmentMetadata?: {
+    programmaticRoute: "pcp-authenticated";
+    selection: {account: string; message_id: string; expected_uid_validity?: string; limit: number};
   };
 }
 
@@ -65,7 +71,7 @@ export const TOOL_GROUPS: Record<string, string> = {
   modify_email: "organize", batch_modify_emails: "organize", star_email: "organize",
   archive_email: "organize", trash_emails: "organize", count_unread_by_label: "organize",
   bulk_modify: "bulk", bulk_trash: "bulk", list_recent_bulk_ops: "bulk", undo_bulk_op: "bulk",
-  download_attachment: "attachments", read_proton_attachment: "attachments",
+  download_attachment: "attachments", read_proton_attachment: "attachments", inspect_proton_attachment_metadata: "attachments",
   export_email: "attachments", export_thread: "attachments",
   create_filter: "gmail-extras", list_filters: "gmail-extras", delete_filter: "gmail-extras",
   save_template: "gmail-extras", list_templates: "gmail-extras", delete_template: "gmail-extras",
@@ -88,6 +94,7 @@ function isToolEnabled(name: string): boolean {
 
 export function hasPrivateAttachmentRoute(ctx?: ToolContext): boolean {
   const policy = ctx?.protonAttachment, selection = policy?.selection;
+  try { metadataIdentity(selection?.message_id); metadataEpoch(selection?.expected_uid_validity); } catch { return false; }
   return policy?.programmaticRoute === "pcp-authenticated" && !!selection &&
     /^[A-Za-z0-9._-]{1,64}$/.test(selection.account) &&
     /^[^\x00-\x1f\x7f]{1,256}:[1-9][0-9]{0,9}$/.test(selection.message_id) &&
@@ -96,9 +103,22 @@ export function hasPrivateAttachmentRoute(ctx?: ToolContext): boolean {
     (selection.format === "txt" || selection.format === "pdf");
 }
 
+export function hasPrivateAttachmentMetadataRoute(ctx?: ToolContext): boolean {
+  const policy = ctx?.protonAttachmentMetadata, selection = policy?.selection;
+  if (policy?.programmaticRoute !== "pcp-authenticated" || !selection ||
+      typeof selection.account !== "string" || !/^[A-Za-z0-9._-]{1,64}$/.test(selection.account) ||
+      Object.keys(selection).some(key => !["account", "message_id", "expected_uid_validity", "limit"].includes(key))) return false;
+  try {
+    metadataIdentity(selection.message_id); metadataLimit(selection.limit);
+    if (selection.expected_uid_validity !== undefined) metadataEpoch(selection.expected_uid_validity);
+    return true;
+  } catch { return false; }
+}
+
 export function getAllToolDefinitions(ctx?: ToolContext): Tool[] {
   return tools.filter(t => isToolEnabled(t.definition.name) &&
-    (t.definition.name !== "read_proton_attachment" || hasPrivateAttachmentRoute(ctx))).map(t => t.definition);
+    (t.definition.name !== "read_proton_attachment" || hasPrivateAttachmentRoute(ctx)) &&
+    (t.definition.name !== "inspect_proton_attachment_metadata" || hasPrivateAttachmentMetadataRoute(ctx))).map(t => t.definition);
 }
 
 export function sanitizeErrorMessage(message: string, redactTokens: (s: string) => string): string {
@@ -135,6 +155,8 @@ export async function handleToolCall(
   }
   if (name === "read_proton_attachment" && !hasPrivateAttachmentRoute(ctx))
     return errorResult(tool, "Private programmatic attachment route unavailable");
+  if (name === "inspect_proton_attachment_metadata" && !hasPrivateAttachmentMetadataRoute(ctx))
+    return errorResult(tool, "Private programmatic attachment metadata route unavailable");
   if (!isToolEnabled(name)) {
     return errorResult(
       tool,

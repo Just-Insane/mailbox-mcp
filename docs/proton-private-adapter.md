@@ -31,7 +31,10 @@ operation selection denies before `getProvider` can construct a provider.
 `receiptReference`, ISO-8601 `expiresAt`, and independently optional
 `metadataSelection` / `attachmentSelection`. The policy is snapshotted per
 request, bounded to 16 KiB, and its expiry is rechecked before provider
-construction and response exposure. Operator configuration is not evidence that
+construction and response exposure. Expiry requires a real Gregorian calendar
+date and clock time; impossible dates and normalized `24:00` values are rejected.
+Accepted `Z` timestamps retain seconds/fractional precision, and explicit offsets
+remain supported. Operator configuration is not evidence that
 the existing host authentication or processing permissions have been qualified.
 
 | Route | Exact JSON request | Success response |

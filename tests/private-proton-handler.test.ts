@@ -51,6 +51,15 @@ describe('private Proton HTTP adapter',()=>{
   const f=fixture();f.verifyGateway.mockResolvedValue(null as any);const req=request();req.headers.set('x-principal','existing-principal');req.headers.set('x-audience','existing-audience');
   expect((await createProtonPrivateHandler(f.options)(req)).status).toBe(403);expect(f.getProvider).not.toHaveBeenCalled();
  });
+ it.each(['2026-02-31T12:00:00Z','2025-02-29T12:00:00.000Z','2100-02-29T12:00:00Z','2026-04-31T12:00:00+01:00','2026-10-15T24:00:00Z'])('rejects impossible policy expiry %s before provider construction',async expiresAt=>{
+  const f=fixture();f.options.now=()=>Date.parse('1800-01-01T00:00:00Z');f.policy.expiresAt=expiresAt;
+  expect((await createProtonPrivateHandler(f.options)(request())).status).toBe(403);
+  expect(f.verifyGateway).not.toHaveBeenCalled();expect(f.getProvider).not.toHaveBeenCalled();
+ });
+ it.each(['2000-02-29T12:00:00Z','2028-02-29T12:00:00.123Z','2026-10-15T13:00:00.123456Z','2026-02-28T23:30:00-02:00'])('preserves valid calendar expiry and timestamp precision: %s',async expiresAt=>{
+  const f=fixture();f.options.now=()=>Date.parse('1800-01-01T00:00:00Z');f.policy.expiresAt=expiresAt;
+  expect((await createProtonPrivateHandler(f.options)(request())).status).toBe(200);expect(f.getProvider).toHaveBeenCalledOnce();
+ });
  it.each(['/v1/private/proton/x/../metadata','/v1/private/proton/%2e/metadata','/v1/private/proton/x/%2E%2E/metadata'])('denies normalized route alias %s before provider construction',async target=>{
   const f=fixture();const req=rawRequest(target);expect(new URL(req.url).pathname).toBe('/v1/private/proton/metadata');
   expect((await createProtonPrivateHandler(f.options)(req)).status).toBe(403);expect(f.getProvider).not.toHaveBeenCalled();

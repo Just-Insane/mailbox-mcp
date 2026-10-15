@@ -34,6 +34,18 @@ function response(body: unknown, status: number) {
 function text(value: unknown, max: number) {
   return typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\x00-\x1f\x7f]/.test(value);
 }
+function realExpiry(value: unknown): boolean {
+  if (!text(value, 64)) return false;
+  const match = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.exec(value as string);
+  if (!match) return false;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  // Date.parse normalizes impossible calendar dates and 24:00; reject those
+  // components without canonicalizing away accepted fractional precision/offsets.
+  return month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1] &&
+    hour <= 23 && minute <= 59 && second <= 59 && Number.isFinite(Date.parse(value as string));
+}
 function policySnapshot(input: unknown): ProtonPrivatePolicy {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw denied();
   const encoded = JSON.stringify(input);
@@ -41,8 +53,7 @@ function policySnapshot(input: unknown): ProtonPrivatePolicy {
   const policy = JSON.parse(encoded);
   if (Object.keys(policy).some(key => !["status", "principal", "audience", "receiptReference", "expiresAt", "metadataSelection", "attachmentSelection"].includes(key)) ||
       policy.status !== "qualified" || !text(policy.principal, 256) || !text(policy.audience, 256) || !text(policy.receiptReference, 512) ||
-      !text(policy.expiresAt, 64) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(policy.expiresAt) ||
-      !Number.isFinite(Date.parse(policy.expiresAt))) throw denied();
+      !realExpiry(policy.expiresAt)) throw denied();
   return policy;
 }
 async function readJson(request: Request, signal: AbortSignal): Promise<Record<string, unknown>> {

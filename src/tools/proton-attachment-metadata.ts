@@ -28,9 +28,11 @@ registerTool({
     required: ["schemaVersion"], oneOf: [{required: ["account", "message_id", "metadata"]}, {required: ["error"]}]},
 }, async (args, ctx) => {
   const selection = ctx.protonAttachmentMetadata?.selection;
+  const selectionFields = (["account", "message_id", "limit", "expected_uid_validity"] as const)
+    .filter(key => key !== "expected_uid_validity" || selection?.expected_uid_validity !== undefined);
   if (!hasPrivateAttachmentMetadataRoute(ctx) || !selection ||
-      Object.keys(args).length !== Object.keys(selection).length ||
-      Object.keys(selection).some(key => args[key] !== selection[key as keyof typeof selection]))
+      Object.keys(args).length !== selectionFields.length ||
+      selectionFields.some(key => args[key] !== selection[key]))
     throw new Error("Metadata request does not match trusted exact-parent selection");
   try {
     const provider = await ctx.getProvider(selection.account);

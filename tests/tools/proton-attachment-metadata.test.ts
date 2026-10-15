@@ -30,6 +30,18 @@ describe('private exact-parent metadata tool',()=>{
   expect(f.provider.inspectAttachmentMetadata).toHaveBeenCalledWith('INBOX:7',{limit:20,expectedUidValidity:'42'});
   f.metadata.uidValidity='43';expect((await handleToolCall(name,{...request,expected_uid_validity:'42'},f.ctx)).isError).toBe(true);
  });
+ it('treats an explicitly undefined trusted epoch as absent for a JSON request',async()=>{
+  const f=fixture();f.ctx.protonAttachmentMetadata!.selection.expected_uid_validity=undefined;
+  const args=JSON.parse(JSON.stringify(request));expect(Object.keys(args)).toHaveLength(3);
+  const result=await handleToolCall(name,args,f.ctx);
+  expect(result.isError).not.toBe(true);expect(result.structuredContent).toMatchObject({schemaVersion:'1.0',metadata:{uidValidity:'42'}});
+  expect(f.provider.inspectAttachmentMetadata).toHaveBeenCalledExactlyOnceWith('INBOX:7',{limit:20});
+ });
+ it.each([undefined,'41'])('denies missing or mismatched request epoch against a pinned selection: %s',async epoch=>{
+  const f=fixture();f.ctx.protonAttachmentMetadata!.selection.expected_uid_validity='42';
+  const args=JSON.parse(JSON.stringify({...request,expected_uid_validity:epoch}));
+  expect((await handleToolCall(name,args,f.ctx)).isError).toBe(true);expect(f.ctx.getProvider).not.toHaveBeenCalled();
+ });
  it.each([{account:'other'},{message_id:'INBOX:8'},{limit:21},{expected_uid_validity:'42'},{part_id:'2'},{consumer:'pcp'},{destination:'private'},{path:'/tmp/x'},{body:true}])('denies mismatched/extra arguments before provider %j',async change=>{
   const f=fixture();expect((await handleToolCall(name,{...request,...change},f.ctx)).isError).toBe(true);expect(f.ctx.getProvider).not.toHaveBeenCalled();
  });

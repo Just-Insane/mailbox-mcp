@@ -519,8 +519,16 @@ export class ImapProvider implements MailProvider {
         if (!Array.isArray(value) || value.length > 64) throw new Error("Proton metadata addresses outside bounds");
         return value.map(address => {
           if (!address || typeof address !== "object" || Array.isArray(address)) throw new Error("Proton metadata address invalid");
+          if (typeof address.address !== "string" || "group" in address) throw new Error("Proton metadata address invalid");
+          const mailbox = metadataText(address.address, 4096, false);
+          const separator = mailbox.lastIndexOf("@");
+          // ImapFlow flattens group starts to "Group@" and loses the closing
+          // marker. Require mailbox components; never format a name-only/group
+          // entry as an invented address. Quoted locals/domain literals remain opaque.
+          if (mailbox !== mailbox.trim() || separator < 1 || separator === mailbox.length - 1 ||
+              !mailbox.slice(0, separator).trim() || !mailbox.slice(separator + 1).trim())
+            throw new Error("Proton metadata address invalid");
           if (address.name !== undefined) metadataText(address.name, 4096);
-          if (address.address !== undefined) metadataText(address.address, 4096);
           return metadataText(formatAddress(address), 4096);
         });
       };

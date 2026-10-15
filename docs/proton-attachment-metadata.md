@@ -30,6 +30,13 @@ Internet Message-ID/address strings to 4,096, subject to 16,384, and each addres
 array to 64 entries. UID and epoch are positive uint32 values. Metadata and the
 complete tool response are bounded to 262,144 serialized UTF-8 bytes.
 
+Envelope address entries must contain a complete, nonempty mailbox address before
+formatting; names alone do not establish a sender or recipient. Quoted local
+parts and domain literals remain supported without introducing a new RFC address
+parser. The pinned ImapFlow parser flattens group-start markers to `Group@` and
+drops group-end markers, so this inspection rejects those unsupported group
+observations instead of inventing addresses or silently omitting recipients.
+
 `inspect_proton_attachment_metadata` wraps this result as
 `{schemaVersion:"1.0",account,message_id,metadata}`. Input pins `account`,
 `message_id`, `limit` and, if selected, `expected_uid_validity`. The tool requires

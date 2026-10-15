@@ -1,5 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
 import {ImapProvider} from '../../src/providers/imap.js';
+import imapTools from 'imapflow/lib/tools.js';
 
 function fixture(){
  const release=vi.fn();
@@ -32,6 +33,29 @@ describe('metadata-only Proton attachment inspection',()=>{
  it('bounds and truncates actual attachment candidates without including body parts',async()=>{
   const f=fixture();f.meta.bodyStructure.childNodes=Array.from({length:101},(_,i)=>({...f.part,part:String(i+1)}));
   const result=await f.inspect('42',100);expect(result.attachments).toHaveLength(100);expect(result.truncated).toBe(true);expect(f.imap.download).not.toHaveBeenCalled();
+ });
+ it.each(['from','to','cc'] as const)('rejects malformed %s mailbox entries without formatting placeholders',async field=>{
+  for(const address of [{},{name:'Name'},{address:''},{address:'   '},{address:'local@'},{address:'@example.invalid'},{name:'Name',address:undefined},{name:'Group',group:[]}]){
+   const f=fixture();f.meta.envelope[field]=[address] as any;
+   await expect(f.inspect()).rejects.toThrow(/metadata/);
+   expect(f.imap.download).not.toHaveBeenCalled();expect(f.release).toHaveBeenCalledOnce();
+  }
+ });
+ it('preserves complete mailbox forms without imposing a new RFC address parser',async()=>{
+  const f=fixture();f.meta.envelope.from=[{name:'Sender',address:'sender@example.invalid'}];
+  f.meta.envelope.to=[{address:'"quoted local"@example.invalid'},{name:'Literal',address:'user@[IPv6:2001:db8::1]'}] as any;
+  const result=await f.inspect();expect(result.envelope).toMatchObject({from:'Sender <sender@example.invalid>',
+   to:['"quoted local"@example.invalid','Literal <user@[IPv6:2001:db8::1]>'],cc:[]});
+  expect(f.imap.download).not.toHaveBeenCalled();
+ });
+ it('rejects group markers produced by the pinned ImapFlow envelope parser',async()=>{
+  const token=(value:string)=>({type:'STRING',value});
+  const rawGroup=[[null,null,token('Friends'),null],[null,null,token('member'),token('example.invalid')],[null,null,null,null]];
+  const parsed=imapTools.parseEnvelope([null,null,null,null,null,rawGroup]);
+  expect(parsed.to).toEqual([{name:'',address:'Friends@'},{name:'',address:'member@example.invalid'}]);
+  const f=fixture();f.meta.envelope.to=parsed.to as any;
+  await expect(f.inspect()).rejects.toThrow('Proton metadata address invalid');
+  expect(f.imap.download).not.toHaveBeenCalled();expect(f.release).toHaveBeenCalledOnce();
  });
  it.each(['duplicate','part','missing-part','filename','mime','size','subject','addresses','address-string','date','nodes','depth','structure','null-child'])('fails closed for malformed or excessive %s metadata',async mode=>{
   const f=fixture();

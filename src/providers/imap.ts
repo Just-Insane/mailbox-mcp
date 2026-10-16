@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ImapFlow } from "imapflow";
 import type { Transporter } from "nodemailer";
 import { stripCRLF } from "../security/validation.js";
@@ -6,7 +7,7 @@ import { ensureReplyPrefix, ensureForwardPrefix } from "./headers.js";
 import type {
   MailProvider, ProviderCapabilities, EmailSummary, EmailMessage,
   EmailThread, Label, SendOptions, ReplyOptions, ForwardOptions,
-  DraftOptions, AttachmentInfo, Attachment, DraftSummary, UnreadCount, ExportedMessage,
+  DraftOptions, AttachmentInfo, Attachment, DraftSummary, UnreadCount, ExportedMessage, ReceiptPage,
 } from "./interface.js";
 
 function formatAddress(addr: { address?: string; name?: string } | undefined): string {
@@ -692,29 +693,87 @@ export class ImapProvider implements MailProvider {
   }
 
   async messagesSince(since: string, folder: string = "INBOX", maxResults: number = 50): Promise<EmailSummary[]> {
+    const page = await this.messagesSincePage(since, folder, maxResults);
+    if (!page.complete) throw new Error("Partial receipt window; use messagesSincePage and its nextCursor");
+    return page.messages;
+  }
+
+  /** Descending UID pages; receipt timestamps do not necessarily follow UID order. */
+  async messagesSincePage(since: string, folder: string = "INBOX", maxResults: number = 50,
+    cursor?: string): Promise<ReceiptPage> {
     const date = new Date(since);
-    if (Number.isNaN(date.getTime())) throw new Error(`Invalid since timestamp: ${since}`);
-    const lock = await this.imap.getMailboxLock(folder);
+    if (!Number.isFinite(date.getTime())) throw new Error("Invalid since timestamp");
+    if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 500) throw new Error("Invalid maxResults");
+    const account = createHash("sha256").update(this.email).digest("hex");
+    let resume: { account: string; since: string; folder: string; epoch: string; before: number } | undefined;
+    if (cursor !== undefined) {
+      try {
+        if (cursor.length > 4096) throw new Error();
+        resume = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+        if (!resume || resume.account !== account || resume.since !== date.toISOString() || resume.folder !== folder ||
+          !/^[1-9]\d*$/.test(resume.epoch) || !Number.isSafeInteger(resume.before) ||
+          resume.before < 1 || resume.before > 4294967296) throw new Error();
+      } catch { throw new Error("Invalid receipt cursor"); }
+    }
+    const lock = await this.imap.getMailboxLock(folder, { readOnly: true });
     try {
-      // Same UID/seq mismatch as searchByText: search() returns seq nums by
-      // default, fetchAll then treats them as UIDs. Pass { uid: true } at
-      // both call sites so the pipeline is UID-based end to end.
-      const uids = (await this.imap.search({ since: date }, { uid: true })) || [];
-      const limited = uids.slice(-maxResults).reverse();
-      if (limited.length === 0) return [];
-      const messages = await this.imap.fetchAll(limited, {
-        envelope: true, flags: true, bodyStructure: true, uid: true,
-      }, { uid: true });
-      return messages.map((msg: any) => ({
-        id: `${folder}:${msg.uid}`,
-        from: formatAddress(msg.envelope?.from?.[0]),
-        to: formatAddresses(msg.envelope?.to),
-        subject: msg.envelope?.subject ?? "",
-        snippet: "",
-        date: msg.envelope?.date?.toISOString() ?? "",
-        labels: [],
-        hasAttachments: (msg.bodyStructure?.childNodes?.length ?? 0) > 0,
-      }));
+      const mailbox = this.imap.mailbox;
+      if (!mailbox || !mailbox.uidValidity || !Number.isSafeInteger(mailbox.uidNext) ||
+        mailbox.uidNext < 1) throw new Error("IMAP mailbox epoch/UID boundary unavailable");
+      const epoch = String(mailbox.uidValidity);
+      if (resume && resume.epoch !== epoch) throw new Error("Mailbox epoch changed; restart receipt query");
+      let before = resume?.before ?? mailbox.uidNext;
+      const lower = Math.max(1, before - 1000);
+      // SINCE is calendar-only. Include a prior UTC day for timezone offsets,
+      // then compare exact INTERNALDATE instants. Preserve years below 100.
+      const candidateDay = new Date(date);
+      candidateDay.setUTCHours(0, 0, 0, 0);
+      candidateDay.setUTCDate(candidateDay.getUTCDate() - 1);
+      const messages: EmailSummary[] = [];
+      if (before > 1) {
+        const found = (await this.imap.search({ since: candidateDay, uid: `${lower}:${before - 1}` }, { uid: true })) || [];
+        const uids = [...new Set(found)].sort((a, b) => b - a);
+        if (uids.some(uid => !Number.isSafeInteger(uid) || uid < lower || uid >= before)) {
+          throw new Error("Invalid IMAP receipt candidate UID");
+        }
+        // At most 500 metadata rows (100 per fetch), within one 1000-UID range.
+        let inspected = 0;
+        for (let offset = 0; offset < uids.length && inspected < 500 && messages.length < maxResults; offset += 100) {
+          const ids = uids.slice(offset, Math.min(offset + 100, 500));
+          const batch = await this.imap.fetchAll(ids, {
+            envelope: true, flags: true, bodyStructure: true, uid: true, internalDate: true,
+          }, { uid: true });
+          const byUid = new Map(batch.map(msg => [msg.uid, msg]));
+          for (const uid of ids) {
+            const msg = byUid.get(uid);
+            // Expunged messages may vanish between SEARCH and FETCH.
+            before = uid;
+            inspected++;
+            if (!msg) continue;
+            if (!(msg.internalDate instanceof Date) || !Number.isFinite(msg.internalDate.getTime())) {
+              throw new Error("Invalid IMAP internalDate");
+            }
+            if (msg.internalDate.getTime() > date.getTime()) messages.push({
+              id: `${folder}:${uid}`,
+              from: formatAddress(msg.envelope?.from?.[0]),
+              to: formatAddresses(msg.envelope?.to),
+              subject: msg.envelope?.subject ?? "",
+              snippet: "",
+              date: msg.envelope?.date?.toISOString() ?? "",
+              receivedAt: msg.internalDate.toISOString(),
+              labels: [],
+              hasAttachments: (msg.bodyStructure?.childNodes?.length ?? 0) > 0,
+            });
+            if (messages.length === maxResults) break;
+          }
+        }
+        // All candidates in this range consumed, including a sparse/empty range.
+        if (uids.length === 0 || before === uids[uids.length - 1]) before = lower;
+      }
+      const complete = before <= 1;
+      return { messages, complete, ...(!complete ? { nextCursor: Buffer.from(JSON.stringify({
+        account, since: date.toISOString(), folder, epoch, before,
+      })).toString("base64url") } : {}) };
     } finally {
       lock.release();
     }

@@ -21,7 +21,7 @@ function createMockImapClient() {
     append: vi.fn(),
     getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
     on: vi.fn(),
-    mailbox: { exists: 0, unseen: 0 },
+    mailbox: { exists: 0, unseen: 0, uidValidity: 7n, uidNext: 100 },
   };
 }
 
@@ -335,13 +335,13 @@ describe("ImapProvider", () => {
     const since = "2026-05-01T00:00:00Z";
     mockImap.search.mockResolvedValue([17, 23]);
     mockImap.fetchAll.mockResolvedValue([
-      { uid: 23, envelope: { from: [{ address: "a@x" }], to: [], subject: "x", date: new Date(0) }, bodyStructure: { childNodes: [] } },
-      { uid: 17, envelope: { from: [{ address: "b@x" }], to: [], subject: "y", date: new Date(0) }, bodyStructure: { childNodes: [] } },
+      { uid: 23, internalDate: new Date("2026-05-01T01:00:00Z"), envelope: { from: [{ address: "a@x" }], to: [], subject: "x", date: new Date(0) }, bodyStructure: { childNodes: [] } },
+      { uid: 17, internalDate: new Date("2026-05-01T01:00:00Z"), envelope: { from: [{ address: "b@x" }], to: [], subject: "y", date: new Date(0) }, bodyStructure: { childNodes: [] } },
     ]);
 
     const results = await provider.messagesSince(since);
     expect(mockImap.search).toHaveBeenCalledWith(
-      { since: expect.any(Date) },
+      { since: expect.any(Date), uid: "1:99" },
       { uid: true }
     );
     expect(mockImap.fetchAll).toHaveBeenCalledWith(
@@ -575,4 +575,110 @@ describe("ImapProvider", () => {
     expect(results).toEqual([]);
     expect(mockImap.fetch).not.toHaveBeenCalled();
   });
+});
+
+// C4/#1191: synthetic receipt metadata only; no mailbox access.
+describe("IMAP precise receipt windows", () => {
+  const cutoff = "2026-10-05T12:00:00Z";
+  const received = "2026-10-05T13:00:00Z";
+  function row(uid: number, internalDate: unknown = new Date(received)) {
+    return { uid, internalDate, envelope: { date: new Date("2000-01-01T00:00:00Z"), subject: "synthetic" } };
+  }
+  function harness(rows: any[], uidNext = 100) {
+    const client = createMockImapClient();
+    Object.assign(client.mailbox, { uidValidity: 7n, uidNext });
+    client.search.mockImplementation(async (query: any) => {
+      const [lo, hi] = query.uid ? query.uid.split(":").map(Number) : [1, Infinity];
+      return rows.filter(r => r.uid >= lo && r.uid <= hi).map(r => r.uid);
+    });
+    client.fetchAll.mockImplementation(async (uids: number[]) => rows.filter(r => uids.includes(r.uid)));
+    const provider = new ImapProvider(client as any, {} as any, "synthetic@example.test");
+    return { provider, client };
+  }
+  it("excludes same-day receipt instants before and equal to cutoff", async () => {
+    const { provider } = harness([row(1), row(2, new Date(cutoff)), row(3, new Date("2026-10-05T11:59:59Z"))]);
+    expect((await provider.messagesSince(cutoff)).map(m => m.id)).toEqual(["INBOX:1"]);
+  });
+  it("finds a qualifying low UID hidden by pre-filter limiting", async () => {
+    const { provider } = harness([row(1), row(2, new Date(cutoff)), row(3, new Date(cutoff))]);
+    expect((await provider.messagesSince(cutoff, "Archive", 1)).map(m => m.id)).toEqual(["Archive:1"]);
+  });
+  it("preserves sender date and exposes receipt time separately", async () => {
+    const { provider } = harness([row(1)]);
+    expect((await provider.messagesSince(cutoff))[0]).toMatchObject({ date: "2000-01-01T00:00:00.000Z", receivedAt: "2026-10-05T13:00:00.000Z" });
+  });
+  it.each([undefined, false, new Date(NaN)])("fails closed for invalid INTERNALDATE %s", async internalDate => {
+    const { provider, client } = harness([{ ...row(1), internalDate }]);
+    await expect(provider.messagesSince(cutoff)).rejects.toThrow("Invalid IMAP internalDate");
+    expect((await client.getMailboxLock.mock.results[0].value).release).toHaveBeenCalledOnce();
+  });
+  it.each([0, -1, 1.5, NaN, 501])("rejects an invalid result limit %s before IMAP", async limit => {
+    const { provider, client } = harness([]);
+    await expect(provider.messagesSince(cutoff, "INBOX", limit)).rejects.toThrow("Invalid maxResults");
+    expect(client.getMailboxLock).not.toHaveBeenCalled();
+  });
+  it("bounds metadata work and resumes past an empty partial page", async () => {
+    const rows = Array.from({ length: 601 }, (_, i) => row(i + 1, new Date(i === 0 ? received : cutoff)));
+    const { provider, client } = harness(rows, 602);
+    const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
+    expect(first.messages).toEqual([]);
+    expect(first.complete).toBe(false);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    expect(client.fetchAll.mock.calls.flatMap(c => c[0])).toHaveLength(500);
+    expect(client.fetchAll.mock.calls.every(c => c[0].length <= 100)).toBe(true);
+    const second = await provider.messagesSincePage(cutoff, "INBOX", 1, first.nextCursor);
+    expect(second.messages.map(m => m.id)).toEqual(["INBOX:1"]);
+    expect(second.complete).toBe(true);
+    expect(second.nextCursor).toBeUndefined();
+  });
+  it("continues at the last inspected UID without skipping fetched matches", async () => {
+    const { provider } = harness([row(7), row(2), row(5)], 8);
+    const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
+    expect(first.messages.map(m => m.id)).toEqual(["INBOX:7"]);
+    const second = await provider.messagesSincePage(cutoff, "INBOX", 2, first.nextCursor);
+    expect(second.messages.map(m => m.id)).toEqual(["INBOX:5", "INBOX:2"]);
+    expect(second.complete).toBe(true);
+  });
+  it("does not silently truncate the legacy array contract", async () => {
+    const { provider } = harness([row(1), row(2)]);
+    await expect(provider.messagesSince(cutoff, "INBOX", 1)).rejects.toThrow("messagesSincePage");
+  });
+  it("binds continuation to folder, cutoff and mailbox epoch", async () => {
+    const { provider, client } = harness([row(1), row(2)]);
+    const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
+    await expect(provider.messagesSincePage(cutoff, "Archive", 1, first.nextCursor)).rejects.toThrow("Invalid receipt cursor");
+    await expect(provider.messagesSincePage(received, "INBOX", 1, first.nextCursor)).rejects.toThrow("Invalid receipt cursor");
+    Object.assign(client.mailbox, { uidValidity: 8n });
+    await expect(provider.messagesSincePage(cutoff, "INBOX", 1, first.nextCursor)).rejects.toThrow("Mailbox epoch changed");
+  });
+  it.each([
+    ["2026-10-05T00:30:00Z", "2026-10-04T23:45:00-02:00", "2026-10-04T00:00:00Z"],
+    ["2026-11-01T01:30:00-04:00", "2026-11-01T01:15:00-05:00", "2026-10-31T00:00:00Z"],
+    ["0099-10-05T12:00:00Z", "0099-10-05T13:00:00Z", "0099-10-04T00:00:00Z"],
+  ])("uses precise instants and conservative calendar search for %s", async (since, receipt, day) => {
+    const { provider, client } = harness([row(1, new Date(receipt))]);
+    expect((await provider.messagesSince(since))[0].id).toBe("INBOX:1");
+    expect(client.search).toHaveBeenCalledWith(expect.objectContaining({ since: new Date(day) }), { uid: true });
+    expect(client.getMailboxLock).toHaveBeenCalledWith("INBOX", { readOnly: true });
+  });
+
+  it("continues an empty sparse UID range without claiming completeness", async () => {
+    const { provider, client } = harness([row(1)], 2002);
+    const first = await provider.messagesSincePage(cutoff);
+    expect(first).toMatchObject({ messages: [], complete: false, nextCursor: expect.any(String) });
+    const second = await provider.messagesSincePage(cutoff, "INBOX", 50, first.nextCursor);
+    expect(second.messages).toEqual([]);
+    expect(second.complete).toBe(false);
+    const third = await provider.messagesSincePage(cutoff, "INBOX", 50, second.nextCursor);
+    expect(third.messages.map(m => m.id)).toEqual(["INBOX:1"]);
+    expect(third.complete).toBe(true);
+    expect(client.search.mock.calls.map(c => c[0].uid)).toEqual(["1002:2001", "2:1001", "1:1"]);
+  });
+  it("rejects continuation from a different account identity", async () => {
+    const { provider, client } = harness([row(1), row(2)]);
+    const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
+    const other = new ImapProvider(client as any, {} as any, "other@example.test");
+    await expect(other.messagesSincePage(cutoff, "INBOX", 1, first.nextCursor)).rejects.toThrow("Invalid receipt cursor");
+  });
+
 });

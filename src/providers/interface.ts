@@ -1,3 +1,5 @@
+import type {AttachmentMetadata, AttachmentMetadataOptions} from "./proton-attachment-metadata.js";
+
 export interface ReceiptPage {
   messages: EmailSummary[];
   /** All candidates through this query's initial UID boundary were inspected. */
@@ -147,6 +149,8 @@ export interface MailProvider {
   batchModifyLabels(messageIds: string[], add: string[], remove: string[]): Promise<void>;
 
   downloadAttachment(messageId: string, attachmentId: string): Promise<{ filename: string; data: Buffer; mimeType: string }>;
+  /** Metadata only; an initially observed epoch is a new identity, not a legacy-parent mapping. */
+  inspectAttachmentMetadata?(messageId: string, options?: AttachmentMetadataOptions): Promise<AttachmentMetadata>;
   /** Private programmatic cohort only; expected epoch comes from the parent, never this response. */
   readAttachmentBounded?(messageId: string, partId: string, expectedUidValidity: string,
     maxBytes: number): Promise<{ folder: string; uid: number; uidValidity: string;

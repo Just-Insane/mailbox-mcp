@@ -64,4 +64,15 @@ describe("private attachment tool", () => {
     const result=await handleToolCall("read_proton_attachment",request,f.ctx);
     expect(result.isError).not.toBe(true);expect(result.structuredContent).toMatchObject({size:0,base64:"",sha256:createHash("sha256").update(Buffer.alloc(0)).digest("hex")});
   });
+  it("rejects zero-byte PDF to match the existing PCP consumer contract",async()=>{
+    const f=context();const selection={...request,format:"pdf"};f.ctx.protonAttachment!.selection=selection as any;
+    f.provider.readAttachmentBounded.mockResolvedValue({folder:"INBOX",uid:7,uidValidity:"42",partId:"2",filename:"empty.pdf",mimeType:"application/pdf",data:Buffer.alloc(0)});
+    expect((await handleToolCall("read_proton_attachment",selection,f.ctx)).isError).toBe(true);
+  });
+  it.each([{message_id:"INBOX:4294967296"},{expected_uid_validity:"4294967296"}])("denies out-of-range byte selection before provider %j",async change=>{
+    const f=context();Object.assign(f.ctx.protonAttachment!.selection,change);
+    expect(getAllToolDefinitions(f.ctx).map(tool=>tool.name)).not.toContain("read_proton_attachment");
+    expect((await handleToolCall("read_proton_attachment",{...request,...change},f.ctx)).isError).toBe(true);
+    expect(f.ctx.getProvider).not.toHaveBeenCalled();
+  });
 });

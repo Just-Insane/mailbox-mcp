@@ -7,8 +7,9 @@ import { ensureReplyPrefix, ensureForwardPrefix } from "./headers.js";
 import type {
   MailProvider, ProviderCapabilities, EmailSummary, EmailMessage,
   EmailThread, Label, SendOptions, ReplyOptions, ForwardOptions,
-  DraftOptions, AttachmentInfo, Attachment, DraftSummary, UnreadCount, ExportedMessage, ReceiptPage,
+  DraftOptions, AttachmentInfo, Attachment, DraftSummary, UnreadCount, ExportedMessage,
 } from "./interface.js";
+import type { ReceiptPage } from "./interface.js";
 
 function formatAddress(addr: { address?: string; name?: string } | undefined): string {
   if (!addr) return "";

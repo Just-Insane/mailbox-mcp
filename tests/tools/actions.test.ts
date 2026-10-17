@@ -114,4 +114,39 @@ describe("action tools", () => {
     expect(r.content[0].text).toContain("work");
     expect(r.content[0].text).toContain("Error");
   });
+  it("emails_since displays both sender and receipt times from a paged provider", async () => {
+    const paged = vi.fn().mockResolvedValue({ messages: [{ id: "INBOX:1", from: "synthetic@example.test", subject: "synthetic", date: "2000-01-01T00:00:00Z", receivedAt: "2026-10-05T13:00:00Z" }], complete: false, nextCursor: "opaque" });
+    Object.assign(provider, { messagesSincePage: paged });
+    const r = await handleToolCall("emails_since", { account: "personal", since: "2026-10-05T12:00:00Z", cursor: "prior" }, ctx);
+    expect(paged).toHaveBeenCalledWith("2026-10-05T12:00:00Z", undefined, 50, "prior");
+    expect(provider.messagesSince).not.toHaveBeenCalled();
+    expect(r.content[0].text).toContain("Received: 2026-10-05T13:00:00Z");
+    expect(r.content[0].text).toContain("Sender date: 2000-01-01T00:00:00Z");
+    expect(r.content[0].text).toContain("Partial");
+    expect(r.content[0].text).toContain("opaque");
+  });
+  it("emails_since does not describe an empty partial page as absence", async () => {
+    Object.assign(provider, { messagesSincePage: vi.fn().mockResolvedValue({ messages: [], complete: false, nextCursor: "next" }) });
+    const r = await handleToolCall("emails_since", { account: "personal", since: "2026-10-05T12:00:00Z" }, ctx);
+    expect(r.content[0].text).toContain("Partial");
+    expect(r.content[0].text).not.toContain("No messages since");
+  });
+  it("emails_since rejects continuation for legacy providers", async () => {
+    const r = await handleToolCall("emails_since", { account: "personal", since: "2026-10-05T12:00:00Z", cursor: "next" }, ctx);
+    expect(r.isError).toBe(true);
+    expect(provider.messagesSince).not.toHaveBeenCalled();
+  });
+
+  it("emails_since labels an empty final continuation as no further messages", async () => {
+    Object.assign(provider, { messagesSincePage: vi.fn().mockResolvedValue({ messages: [], complete: true }) });
+    const r = await handleToolCall("emails_since", { account: "personal", since: "2026-10-05T12:00:00Z", cursor: "prior" }, ctx);
+    expect(r.content[0].text).toContain("No further messages");
+    expect(r.content[0].text).not.toContain("No messages since");
+  });
+
+  it("emails_since qualifies legacy-provider completeness", async () => {
+    const r = await handleToolCall("emails_since", { account: "personal", since: "2026-10-05T12:00:00Z" }, ctx);
+    expect(r.content[0].text).toContain("completeness is unverified");
+  });
+
 });

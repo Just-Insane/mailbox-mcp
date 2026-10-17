@@ -138,22 +138,34 @@ registerTool(
         account: { type: "string", description: "Account alias" },
         since: { type: "string", description: "ISO 8601 timestamp, e.g. '2026-04-20T10:00:00Z'" },
         folder: { type: "string", description: "Optional folder/label to scope the search" },
-        max_results: { type: "number", description: "Max results (default 50)" },
+        max_results: { type: "number", description: "Max results (default 50; IMAP 1–500)" },
+        cursor: { type: "string", description: "Opaque continuation from a partial receipt page; keep account, folder and since unchanged" },
       },
       required: ["account", "since"],
     },
   },
   async (args, ctx) => {
     const provider = await ctx.getProvider(args.account as string);
-    const results = await provider.messagesSince(
-      args.since as string,
-      args.folder as string | undefined,
-      (args.max_results as number) ?? 50,
+    if (args.cursor !== undefined && !provider.messagesSincePage) {
+      throw new Error("Receipt continuation is unavailable for this provider");
+    }
+    const page = provider.messagesSincePage ? await provider.messagesSincePage(
+      args.since as string, args.folder as string | undefined,
+      (args.max_results as number) ?? 50, args.cursor as string | undefined,
+    ) : undefined;
+    const results = page?.messages ?? await provider.messagesSince(
+      args.since as string, args.folder as string | undefined, (args.max_results as number) ?? 50,
     );
-    if (results.length === 0) return { content: [{ type: "text", text: "No messages since that timestamp." }] };
+    if (results.length === 0 && (!page || page.complete)) {
+      return { content: [{ type: "text", text: !page ? "Provider returned no messages; receipt-window completeness is unverified." : args.cursor !== undefined ? "No further messages; receipt window complete." : "No messages since that timestamp." }] };
+    }
     const lines = results.map((m) =>
-      `- **${m.id}** | ${fenceEmailHeader(m.from, "from")} | ${fenceEmailContent(m.subject, "subject")} (${m.date})`
+      `- **${m.id}** | ${fenceEmailHeader(m.from, "from")} | ${fenceEmailContent(m.subject, "subject")} (${m.receivedAt ? `Received: ${m.receivedAt}; Sender date: ${m.date}` : m.date})`
     );
+    if (!page) lines.push("Receipt-window completeness is unverified for this provider.");
+    if (page && !page.complete) {
+      lines.push(`Partial receipt window. Continue with the same account, folder and since, using cursor: ${page.nextCursor}`);
+    }
     return { content: [{ type: "text", text: lines.join("\n") }] };
   }
 );

@@ -1,5 +1,13 @@
 import type {AttachmentMetadata, AttachmentMetadataOptions} from "./proton-attachment-metadata.js";
 
+export interface ReceiptPage {
+  messages: EmailSummary[];
+  /** All candidates through this query's initial UID boundary were inspected. */
+  complete: boolean;
+  /** Opaque continuation; reuse the same account, folder and since timestamp. */
+  nextCursor?: string;
+}
+
 export interface EmailSummary {
   id: string;
   threadId?: string;
@@ -7,7 +15,10 @@ export interface EmailSummary {
   to: string[];
   subject: string;
   snippet: string;
+  /** Sender-provided Date header; never repurposed as receipt time. */
   date: string;
+  /** Provider receipt instant, when verified from server metadata. */
+  receivedAt?: string;
   labels: string[];
   hasAttachments: boolean;
 }
@@ -153,5 +164,7 @@ export interface MailProvider {
   sendDraft(draftId: string): Promise<string>;
   countUnreadByLabel(): Promise<UnreadCount[]>;
   exportMessage(messageId: string): Promise<ExportedMessage>;
+  /** Optional precise, bounded receipt-window query; legacy providers remain compatible. */
+  messagesSincePage?(since: string, folder?: string, maxResults?: number, cursor?: string): Promise<ReceiptPage>;
   messagesSince(since: string, folder?: string, maxResults?: number): Promise<EmailSummary[]>;
 }

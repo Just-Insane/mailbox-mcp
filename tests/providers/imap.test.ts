@@ -3,6 +3,9 @@ import { ImapProvider } from "../../src/providers/imap.js";
 
 function createMockImapClient() {
   return {
+    host: "imap.synthetic.test",
+    port: 993,
+    options: { auth: { user: "synthetic-user", authzid: "" } },
     connect: vi.fn(),
     logout: vi.fn(),
     search: vi.fn(),
@@ -679,6 +682,25 @@ describe("IMAP precise receipt windows", () => {
     const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
     const other = new ImapProvider(client as any, {} as any, "other@example.test");
     await expect(other.messagesSincePage(cutoff, "INBOX", 1, first.nextCursor)).rejects.toThrow("Invalid receipt cursor");
+  });
+
+  it.each(["host", "port", "user", "authzid"])("rejects same-email continuation for a different IMAP %s", async field => {
+    const { provider } = harness([row(1), row(2)]);
+    const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
+    const other = harness([row(1), row(2)]);
+    if (field === "host") other.client.host = "other.synthetic.test";
+    if (field === "port") other.client.port = 1993;
+    if (field === "user") other.client.options.auth.user = "other-user";
+    if (field === "authzid") other.client.options.auth.authzid = "other-mailbox";
+    await expect(other.provider.messagesSincePage(cutoff, "INBOX", 1, first.nextCursor)).rejects.toThrow("Invalid receipt cursor");
+    expect(other.client.getMailboxLock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the IMAP account identity is unavailable", async () => {
+    const { provider, client } = harness([row(1)]);
+    Object.assign(client, { host: undefined });
+    await expect(provider.messagesSincePage(cutoff)).rejects.toThrow("IMAP account identity unavailable");
+    expect(client.getMailboxLock).not.toHaveBeenCalled();
   });
 
 });

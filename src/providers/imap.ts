@@ -704,7 +704,19 @@ export class ImapProvider implements MailProvider {
     const date = new Date(since);
     if (!Number.isFinite(date.getTime())) throw new Error("Invalid since timestamp");
     if (!Number.isSafeInteger(maxResults) || maxResults < 1 || maxResults > 500) throw new Error("Invalid maxResults");
-    const account = createHash("sha256").update(this.email).digest("hex");
+    // ImapFlow retains these connection fields in the pinned implementation.
+    // Bind the actual server/login/delegated mailbox, never passwords or tokens.
+    const identity = this.imap as ImapFlow & {
+      host?: string; port?: number;
+      options?: { auth?: { user?: string; authzid?: string } };
+    };
+    const auth = identity.options?.auth;
+    if (!identity.host || !Number.isSafeInteger(identity.port) || !auth?.user) {
+      throw new Error("IMAP account identity unavailable");
+    }
+    const account = createHash("sha256").update(JSON.stringify([
+      this.email, identity.host, identity.port, auth.user, auth.authzid ?? "",
+    ])).digest("hex");
     let resume: { account: string; since: string; folder: string; epoch: string; before: number } | undefined;
     if (cursor !== undefined) {
       try {

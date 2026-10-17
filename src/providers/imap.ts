@@ -729,7 +729,10 @@ export class ImapProvider implements MailProvider {
     }
     const lock = await this.imap.getMailboxLock(folder, { readOnly: true });
     try {
-      const mailbox = this.imap.mailbox;
+      // A reused lock can retain SELECT-time UIDNEXT. Refresh via read-only
+      // EXAMINE under this lock, avoiding STATUS on the selected mailbox.
+      // Continuations still use their retained UID frontier below.
+      const mailbox = await this.imap.mailboxOpen(folder, { readOnly: true });
       if (!mailbox || !mailbox.uidValidity || !Number.isSafeInteger(mailbox.uidNext) ||
         mailbox.uidNext < 1) throw new Error("IMAP mailbox epoch/UID boundary unavailable");
       const epoch = String(mailbox.uidValidity);

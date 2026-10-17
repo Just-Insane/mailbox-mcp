@@ -20,7 +20,7 @@ function createMockImapClient() {
     mailboxCreate: vi.fn(),
     mailboxDelete: vi.fn(),
     list: vi.fn(),
-    mailboxOpen: vi.fn(),
+    mailboxOpen: vi.fn().mockResolvedValue({ uidNext: 100, uidValidity: 7n }),
     append: vi.fn(),
     getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
     on: vi.fn(),
@@ -590,6 +590,7 @@ describe("IMAP precise receipt windows", () => {
   function harness(rows: any[], uidNext = 100) {
     const client = createMockImapClient();
     Object.assign(client.mailbox, { uidValidity: 7n, uidNext });
+    client.mailboxOpen.mockImplementation(async () => ({ uidNext: client.mailbox.uidNext, uidValidity: client.mailbox.uidValidity }));
     client.search.mockImplementation(async (query: any) => {
       const [lo, hi] = query.uid ? query.uid.split(":").map(Number) : [1, Infinity];
       return rows.filter(r => r.uid >= lo && r.uid <= hi).map(r => r.uid);
@@ -701,6 +702,29 @@ describe("IMAP precise receipt windows", () => {
     Object.assign(client, { host: undefined });
     await expect(provider.messagesSincePage(cutoff)).rejects.toThrow("IMAP account identity unavailable");
     expect(client.getMailboxLock).not.toHaveBeenCalled();
+  });
+
+  it("uses fresh UIDNEXT so a retained mailbox selection does not hide arrivals", async () => {
+    const { provider, client } = harness([row(1), row(4)], 2);
+    client.mailboxOpen.mockResolvedValue({ uidNext: 5, uidValidity: 7n });
+    const page = await provider.messagesSincePage(cutoff);
+    expect(page.messages.map(m => m.id)).toEqual(["INBOX:4", "INBOX:1"]);
+    expect(page.complete).toBe(true);
+    expect(client.mailboxOpen).toHaveBeenCalledWith("INBOX", { readOnly: true });
+  });
+  it("keeps the initial UID frontier on continuation despite later arrivals", async () => {
+    const { provider, client } = harness([row(1), row(2), row(4)], 3);
+    const first = await provider.messagesSincePage(cutoff, "INBOX", 1);
+    client.mailboxOpen.mockResolvedValue({ uidNext: 5, uidValidity: 7n });
+    const next = await provider.messagesSincePage(cutoff, "INBOX", 1, first.nextCursor);
+    expect(next.messages.map(m => m.id)).toEqual(["INBOX:1"]);
+    expect(next.complete).toBe(true);
+  });
+  it.each([false, { uidValidity: 7n }, { uidNext: 0, uidValidity: 7n }])("fails closed when fresh mailbox examination is unavailable: %s", async status => {
+    const { provider, client } = harness([row(1)]);
+    client.mailboxOpen.mockResolvedValue(status as any);
+    await expect(provider.messagesSincePage(cutoff)).rejects.toThrow("IMAP mailbox epoch/UID boundary unavailable");
+    expect(client.search).not.toHaveBeenCalled();
   });
 
 });

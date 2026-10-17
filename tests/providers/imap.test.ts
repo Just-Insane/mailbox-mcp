@@ -3,6 +3,7 @@ import { ImapProvider } from "../../src/providers/imap.js";
 
 function createMockImapClient() {
   return {
+    host: "imap.synthetic.test", port: 993, options: { auth: { user: "synthetic-user", authzid: "" } },
     connect: vi.fn(),
     logout: vi.fn(),
     search: vi.fn(),
@@ -17,7 +18,7 @@ function createMockImapClient() {
     mailboxCreate: vi.fn(),
     mailboxDelete: vi.fn(),
     list: vi.fn(),
-    mailboxOpen: vi.fn(),
+    mailboxOpen: vi.fn().mockResolvedValue({ uidNext: 100, uidValidity: 7n }),
     append: vi.fn(),
     getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
     on: vi.fn(),
@@ -341,7 +342,7 @@ describe("ImapProvider", () => {
 
     const results = await provider.messagesSince(since);
     expect(mockImap.search).toHaveBeenCalledWith(
-      { since: expect.any(Date) },
+      { since: expect.any(Date), uid: "1:99" },
       { uid: true }
     );
     expect(mockImap.fetchAll).toHaveBeenCalledWith(
